@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 #include "list.h"
+#include "uthread.h"
 
 #define STACK_SIZE (8*4096)
 
@@ -29,19 +30,38 @@ static LIST_ENTRY ready_queue;
 
 PUTHREAD running_thread;
 
-void context_switch(PUTHREAD currThread, PUTHREAD nextThread);
+static PUTHREAD main_thread;
 
 static void internal_start() {
 	// call thread function with argument
 	running_thread->start_routine(running_thread->argument);
-	
+
 	// cleanup thread
-	ut_exit();
+	ut_exit(); // never returns
+}
+
+void internal_exit(PUTHREAD currThread, PUTHREAD nextThread);
+
+void context_switch(PUTHREAD currThread, PUTHREAD nextThread);
+
+void cleanup_thread(PUTHREAD thread) {
+	free(thread->stack);
+	free(thread);
+}
+
+__attribute__((always_inline))
+static inline PUTHREAD extract_next_ready_thread() {
+	if (isListEmpty(&ready_queue)) {
+		return main_thread;
+	}
+	PLIST_ENTRY thread_node = removeHeadList(&ready_queue);
+	PUTHREAD next_thread = container_of(thread_node, UTHREAD, node);
+	return next_thread;
 }
 
 void ut_init() {
 	number_of_threads = 0;
-	initializeHeadList(&ready_queue);
+	initializeListHead(&ready_queue);
 }
 
 void ut_end() {
@@ -49,9 +69,19 @@ void ut_end() {
 }
 
 void ut_run() {
+	UTHREAD thread;
 	
-}
+	if (isListEmpty(&ready_queue)) {
+		return;
+	}
+	
+	main_thread = &thread;
+	
+	PUTHREAD first_thread = extract_next_ready_thread();
+	context_switch(main_thread, first_thread);
 
+	main_thread = running_thread = NULL;
+}
 
 void ut_create(void (*start_routine) (void *), void *arg) {
 	
@@ -65,29 +95,35 @@ void ut_create(void (*start_routine) (void *), void *arg) {
 		(
 			(char *)thread->stack
 			+ STACK_SIZE
-			- sizeof(uint64_t) * 5
-			- sizeof(UTHREAD_CONTEXT)
+			- sizeof (uint64_t) * 5
+			- sizeof (UTHREAD_CONTEXT)
 		);
-	
+
 	context->r15 = 0x5555555555555555;
 	context->r14 = 0x4444444444444444;
 	context->r13 = 0x3333333333333333;
 	context->r12 = 0x2222222222222222;
 	context->rbx = 0x1111111111111111;
-	context->rbp = 0x0000000000000000;
+	context->rbp = 0x0000000000000000; // mandatory for debuggers
 	
 	context->ret_addr = internal_start;
 	
 	thread->sp = (uint64_t)context;
 	
 	number_of_threads += 1;
-	insertTailList(&ready_queue, &(thread->node))
-}
-
-void ut_yield() {
-	
+	insertTailList(&ready_queue, &(thread->node));
 }
 
 void ut_exit() {
-	
+	number_of_threads -= 1;
+	PUTHREAD next_thread = extract_next_ready_thread();
+	internal_exit(running_thread, next_thread);
+}
+
+void ut_yield() {
+	if (!isListEmpty(&ready_queue)) {
+		insertTailList(&ready_queue, &(running_thread->node));
+		PUTHREAD next_thread = extract_next_ready_thread();
+		context_switch(running_thread, next_thread);
+	}
 }
